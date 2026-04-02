@@ -77,8 +77,15 @@ jobs:
 
       # ── Environment File ──────────────────────────────────
       - name: 🔐 Create .env file
-        if: ${{ secrets.ENV_FILE != '' }}
-        run: echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+        run: |
+          if [ -n "$ENV_FILE_CONTENT" ]; then
+            echo "$ENV_FILE_CONTENT" | base64 --decode > .env
+            echo "✅ .env file created"
+          else
+            echo "⏭️ No ENV_FILE secret provided, skipping"
+          fi
 
       # ── Expo Prebuild ─────────────────────────────────────
       - name: 🔄 Expo prebuild (generate android project)
