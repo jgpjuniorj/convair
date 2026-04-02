@@ -1,0 +1,200 @@
+# ──────────────────────────────────────────────────────────────
+# Convair — Android Build Engine PRO
+# Reusable workflow for building Expo → Android (APK + AAB)
+# No EAS required. Uses native Gradle + your own keystore.
+# ──────────────────────────────────────────────────────────────
+name: Android Build Engine PRO
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "18"
+      java-version:
+        description: "Java version"
+        required: false
+        type: string
+        default: "17"
+      expo-sdk:
+        description: "Expo SDK version (for cache key)"
+        required: false
+        type: string
+        default: "52"
+      build-apk:
+        description: "Build APK (installable)"
+        required: false
+        type: boolean
+        default: true
+      build-aab:
+        description: "Build AAB (Play Store)"
+        required: false
+        type: boolean
+        default: true
+      upload-diawi:
+        description: "Upload APK to Diawi"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      KEYSTORE_BASE64:
+        required: true
+      KEYSTORE_PASSWORD:
+        required: true
+      KEY_ALIAS:
+        required: true
+      KEY_PASSWORD:
+        required: true
+      DIAWI_TOKEN:
+        required: false
+      ENV_FILE:
+        description: "Contents of .env file (base64 encoded)"
+        required: false
+
+jobs:
+  build:
+    name: "🔨 Build Android"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js ───────────────────────────────────────────
+      - name: 📦 Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+
+      # ── Dependencies ──────────────────────────────────────
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      # ── Environment File ──────────────────────────────────
+      - name: 🔐 Create .env file
+        if: ${{ secrets.ENV_FILE != '' }}
+        run: echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
+
+      # ── Expo Prebuild ─────────────────────────────────────
+      - name: 🔄 Expo prebuild (generate android project)
+        run: npx expo prebuild --platform android --clean
+
+      # ── Java ──────────────────────────────────────────────
+      - name: ☕ Setup Java ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      # ── Gradle Cache ──────────────────────────────────────
+      - name: 📦 Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: gradle-${{ runner.os }}-sdk${{ inputs.expo-sdk }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/app/build.gradle') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-sdk${{ inputs.expo-sdk }}-
+
+      # ── Keystore ──────────────────────────────────────────
+      - name: 🔑 Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore.jks
+          echo "✅ Keystore decoded ($(wc -c < android/app/keystore.jks) bytes)"
+
+      # ── Build APK ─────────────────────────────────────────
+      - name: 🏗️ Build Release APK
+        if: ${{ inputs.build-apk }}
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/keystore.jks \
+            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
+            -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
+
+      # ── Build AAB ─────────────────────────────────────────
+      - name: 🏗️ Build Release AAB
+        if: ${{ inputs.build-aab }}
+        working-directory: android
+        run: |
+          ./gradlew bundleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/keystore.jks \
+            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
+            -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
+
+      # ── Rename artifacts ──────────────────────────────────
+      - name: 📋 Prepare artifacts
+        run: |
+          mkdir -p artifacts
+
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -f "$APK_PATH" ]; then
+            cp "$APK_PATH" artifacts/app-release.apk
+            echo "✅ APK: $(du -h artifacts/app-release.apk | cut -f1)"
+          fi
+
+          AAB_PATH=$(find android/app/build/outputs/bundle/release -name "*.aab" 2>/dev/null | head -1)
+          if [ -f "$AAB_PATH" ]; then
+            cp "$AAB_PATH" artifacts/app-release.aab
+            echo "✅ AAB: $(du -h artifacts/app-release.aab | cut -f1)"
+          fi
+
+      # ── Upload artifacts ──────────────────────────────────
+      - name: 📤 Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-builds
+          path: artifacts/
+          retention-days: 30
+
+      # ── Diawi Upload ──────────────────────────────────────
+      - name: 🌐 Upload APK to Diawi
+        if: ${{ inputs.upload-diawi && inputs.build-apk }}
+        run: |
+          echo "📤 Uploading to Diawi..."
+          RESPONSE=$(curl -s -X POST https://upload.diawi.com/ \
+            -F "token=${{ secrets.DIAWI_TOKEN }}" \
+            -F "file=@artifacts/app-release.apk" \
+            -F "callback_emails=")
+
+          JOB_HASH=$(echo "$RESPONSE" | jq -r '.hash // empty')
+
+          if [ -z "$JOB_HASH" ]; then
+            echo "⚠️ Diawi upload failed: $RESPONSE"
+            exit 0
+          fi
+
+          echo "⏳ Waiting for Diawi processing (hash: $JOB_HASH)..."
+          for i in $(seq 1 20); do
+            sleep 5
+            STATUS=$(curl -s "https://upload.diawi.com/status?token=${{ secrets.DIAWI_TOKEN }}&job=$JOB_HASH")
+            DIAWI_STATUS=$(echo "$STATUS" | jq -r '.status // 0')
+
+            if [ "$DIAWI_STATUS" = "2" ]; then
+              DIAWI_HASH=$(echo "$STATUS" | jq -r '.hash')
+              DIAWI_LINK="https://i.diawi.com/$DIAWI_HASH"
+              echo "✅ Diawi link: $DIAWI_LINK"
+              echo "DIAWI_LINK=$DIAWI_LINK" >> $GITHUB_ENV
+              echo "## 📲 Install Link" >> $GITHUB_STEP_SUMMARY
+              echo "[$DIAWI_LINK]($DIAWI_LINK)" >> $GITHUB_STEP_SUMMARY
+              break
+            elif [ "$DIAWI_STATUS" = "4" ]; then
+              echo "❌ Diawi processing failed"
+              break
+            fi
+            echo "  Attempt $i/20 — status: $DIAWI_STATUS"
+          done
+
+      # ── Cleanup ───────────────────────────────────────────
+      - name: 🧹 Cleanup keystore
+        if: always()
+        run: rm -f android/app/keystore.jks
