@@ -52,6 +52,9 @@ on:
       ENV_FILE:
         description: "Contents of .env file (base64 encoded)"
         required: false
+      GOOGLE_SERVICES_JSON:
+        description: "Contents of google-services.json (base64 encoded)"
+        required: false
 
 jobs:
   build:
@@ -85,6 +88,18 @@ jobs:
             echo "✅ .env file created"
           else
             echo "⏭️ No ENV_FILE secret provided, skipping"
+          fi
+
+      # ── Google Services ───────────────────────────────────
+      - name: 🔐 Create google-services.json
+        env:
+          GOOGLE_SERVICES_CONTENT: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_CONTENT" ]; then
+            echo "$GOOGLE_SERVICES_CONTENT" | base64 --decode > google-services.json
+            echo "✅ google-services.json created"
+          else
+            echo "⏭️ No GOOGLE_SERVICES_JSON secret provided, skipping"
           fi
 
       # ── Expo Prebuild ─────────────────────────────────────
